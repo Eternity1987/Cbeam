@@ -88,16 +88,15 @@ OTA Server + 镜像仓库（云 / 客户内网）
 └───────────────────────────┘
 ```
 
-```text
-实际升级节点 = Release.nodes ∩ 本机拓扑
-```
+业务层不做「只升其中一块板」。板卡是否参与，由机型决定，不由单个 Release 挑着升。
 
-| 情况 | 行为 |
-|------|------|
-| 仅 NX | 单板事务（同四阶段，无 peer） |
-| 有 x86 且 Release 含 x86 | 双板事务 |
-| Release 含 optional x86 但本机无 | 跳过 |
-| required 节点缺失 | Job 失败 |
+| 机型 | 业务 Release 必须包含 | 行为 |
+|------|------------------------|------|
+| 无运控（只有 NX） | 仅 nx | 单板事务 |
+| 有运控（NX + x86） | **nx 和 x86 一起** | 双板同一 `release_id`，一起 PREPARE / ACTIVATE / COMMIT / ROLLBACK |
+| 有运控但 Release 只有一块板 | — | **拒绝 Job**，不进入切换 |
+
+四层（业务容器、OTA Agent、MCU/固件、板卡 OS）仍然分开。一次 Job 只含声明的层；但**业务层只要这台车有两块板，两块板必须同一版本**。MCU、OS、Agent 仍按各自通道升级，不跟每次业务包绑在一起。
 
 ---
 
@@ -121,7 +120,7 @@ Agent **不解析**状态机内部业务协议，但必须通过标准门禁接�
 
 ### 4.1 Release Manifest（不可变、厂商签名、可复用）
 
-同一 release 可发给多台机器人，**不为每个 Job 重签内容包**。
+同一 Release 可发给多台同机型机器人，不为每个 Job 重签内容包。无运控机型的 Release 只有 `nx`。有运控机型的业务 Release 必须同时带 `nx` 和 `x86`，两板 `required: true`。
 
 ```json
 {
@@ -164,7 +163,7 @@ Agent **不解析**状态机内部业务协议，但必须通过标准门禁接�
     {
       "node_id": "x86",
       "arch": "amd64",
-      "required": false,
+      "required": true,
       "compose_project_name": "dr-robot-x86",
       "start_order": ["system", "driver"],
       "stop_order": ["driver", "system"],
@@ -531,6 +530,7 @@ Agent 不得成为自己唯一的回退执行者。
 6. NX 下发 = 已签名 Release + 设备任务上下文（job_id/epoch/nonce/有效期）  
 7. **NX 不持有厂商发布私钥**  
 8. 型号 / 架构 / digest / hash 任一不匹配 → 业务完全不切换  
+9. **防回放，不禁止人工降级。** Release 带单调 `sequence`。普通 Job 只接受 `sequence` 大于本机已提交版本的包；把旧包原样再推一遍必须拒绝。回到旧业务版本必须是一条新的、已签名的降级 Job（`intent: downgrade`），目标可以是旧 `release_id`，但 Job 本身是新的。`force` / `downgrade` 只给这次人工操作，不能当成日常升级开关。自动失败回滚仍走本地 `active_before`，不依赖重放旧包。
 
 ---
 
@@ -605,7 +605,7 @@ RECEIVED
 
 1. 收 Job → 拉/取 Release → 验签 → **SQLite 落盘**  
 2. PREFLIGHT：机型、agent min、空间、（双板）NAT/DNS/时间/CA/registry 鉴权  
-3. DOWNLOADING：参与节点按 digest 直拉（x86 经 NX NAT）；进度上报  
+3. DOWNLOADING：参与节点按 digest 直拉（x86 经 NX NAT）；进度上报。断网失败**保留本地未完成文件**，下次同一 Job / 同一 digest 续传，不整包重下。Docker 层缓存同样保留；校验通过前不切换业务。  
 4. VERIFYING → 展开到 `staged`  
 5. WAITING_FOR_SAFE_STATE → PrepareForOTA  
 6. PREPARING_NODES → ACTIVATE（`--pull never`，按 stop/start order）  
@@ -672,7 +672,7 @@ offline 包进 NX inbox → 验签 → load arm64 →（若有）传 amd64 tar �
 - trial lease  
 - 整 Job 回退与进度汇总  
 - 断网/分区恢复  
-- 新旧版本兼容矩阵  
+- 有运控机型两板同一业务 release，拒绝只含一块板的包  
 - NAT 预检与限流  
 
 ### V1.2：离线胖包
@@ -695,7 +695,7 @@ MCU/内核/OS：仅 Executor 占位。
 
 ## 20. 生产验收标准（方案定稿门槛）
 
-1. 下载阶段任意断网，当前业务不受影响。  
+1. 下载阶段任意断网，当前业务不受影响；已下载内容保留，恢复网络后按 digest 续传。  
 2. NX 在任意状态点断电，启动后只能回到旧稳定版本或完成已提交的新版本。  
 3. x86 在 trial 阶段与 NX 失联，超时自动回退。  
 4. NX/x86 任一节点失败，最终两板回到一致 release。  
@@ -714,7 +714,7 @@ MCU/内核/OS：仅 Executor 占位。
 
 ## 21. 一句话总结
 
-> **以 NX 为控制面、可选 x86 worker；按层升级（业务切容器、Agent 只重启进程、MCU 复位该芯片、系统层才重启板卡），不是每次全升；Release 与 Job 分离并厂商签名；板端用 active/rollback/staged 管理业务生命周期；有网 digest 直拉、激活前安全门禁与强健康检查；双板四阶段事务 + trial lease；SQLite 断电恢复；磁盘按 release 引用清理；Agent 自升级延后并用 bootstrap 兜底。当前为架构基线，补齐异常世界后方可作为正式实现基线。**
+> **以 NX 为控制面；有运控时机型业务层两块板必须一起升。四层分开：业务切容器、Agent 只重启进程、MCU 复位该芯片、系统层才重启板卡。普通升级拒绝重放旧包，人工降级走新的签名 Job。下载失败保留本地文件并续传。Release 与 Job 分离；active/rollback/staged；门禁、健康检查、trial lease、SQLite 与按引用清理。当前为架构基线。**
 
 ---
 
