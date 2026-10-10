@@ -505,7 +505,7 @@ Agent 不得成为自己唯一的回退执行者。
 ### 12.2 清理顺序
 
 1. 失败的 staging  
-2. 过期下载缓存  
+2. 过期下载缓存（半截包和离线 tar：最后写入超过 24 小时，或已不属于当前 Job）  
 3. dangling image  
 4. 不被任何保留 release 引用的镜像  
 5. 若仍不足，且 active 已稳定超过保护期 → 可删**更老的** rollback（保留「当前 active 作为下一 candidate 的回退」所需的那份）  
@@ -606,7 +606,7 @@ RECEIVED
 1. 收 Job → 拉/取 Release → 验签 → **SQLite 落盘**  
 2. PREFLIGHT：机型、agent min、空间、（双板）NAT/DNS/时间/CA/registry 鉴权  
 3. DOWNLOADING：参与节点拉取本板制品和镜像（x86 经 NX NAT）；进度上报。断网后续传分两种，校验通过前都不切换正在运行的业务：
-   - **包**（Release 里的 compose/config 压缩包，以及离线镜像 tar）：未下完的文件留在下载目录，恢复后对同一 URL 续传，再用 sha256 校验。不整包重下。
+   - **包**（Release 里的 compose/config 压缩包，以及离线镜像 tar）：未下完的文件留在下载目录，恢复后对同一 URL 续传，再用 sha256 校验。不整包重下。半截文件只服务当前这次下载，默认保留到**最后一次写入后 24 小时**（可配置），到期删除。校验并展开成功后立刻删下载文件，只留 `staged`。用户取消、Job 失败结束、或新 Job 替换旧 Job 时，旧的半截文件马上删。空间不够时，半截文件优先于 active 被清掉，清掉后下次重新下。
    - **在线镜像**：不落成半截 tar。Docker 按层缓存，已下完的层保留；恢复后对同一个 `repository@digest` 只补缺的层。digest 对上才算该镜像就绪。  
 4. VERIFYING → 展开到 `staged`  
 5. WAITING_FOR_SAFE_STATE → PrepareForOTA  
