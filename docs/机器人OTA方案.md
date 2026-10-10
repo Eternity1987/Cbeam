@@ -24,7 +24,8 @@
 
 | 范围 | 说明 |
 |------|------|
-| MCU / 固件 / 内核 / OS | 仅保留 Executor 接口占位，本基线不实现 |
+| MCU 固件 | 分类已定义；V1 只留 Executor 接口，不实现刷写 |
+| NX/x86 内核、完整 OS、Bootloader | 同上，单独通道，V1 不实现 |
 | Agent 自升级 | **延后到 V1.3**；V1.0–1.2 靠装机预装满足 `min_agent` 的 Agent，不满足则拒绝 Job |
 | 「只回滚失败板」 | 参与节点必须整 Job 收敛到同一 release |
 
@@ -35,6 +36,33 @@
 - online / offline 分层；镜像按 digest
 - Agent / 业务 / 协议解耦
 - Job 落盘恢复
+- 按层升级：Release 没声明的层不升级、不重启
+
+### 1.4 升级分层：一次 Job 只升声明过的层
+
+**不是每次 OTA 都升业务 + Agent + MCU + 内核。** Release 只包含本次要变的组件；没有的层不动、不重启。
+
+| 层 | 典型内容 | 生效方式 | 频率 | 本基线 |
+|----|----------|----------|------|--------|
+| **业务** | Docker 镜像、Compose、业务配置 | 重建/切换容器；**不重启** NX/x86 | 最高，日常发版 | **V1.0–1.2 只做这一层** |
+| **OTA Agent** | Agent 二进制 | 重启 Agent 进程；**不重启宿主机** | 协议变化才升 | V1.3 |
+| **MCU 固件** | 关节、电源、传感器等 MCU | 重启**对应 MCU**；通常不重启 NX/x86 | 中低 | 预留 Executor |
+| **板卡系统** | NX/x86 内核、完整 OS、Bootloader | **重启对应板卡**（常为 A/B 分区） | 最低 | 预留 Executor |
+
+规则：
+
+1. Job 的重启范围 = 本次 Release 里**实际出现**的层的并集，取最重的那一档。只有业务时，整机不重启。
+2. 各层版本独立。业务 `release_id`、Agent 版本、MCU 固件版本、OS 版本互不绑死。
+3. 回滚也按层：业务回 `active_before`；未升级的层不动。
+4. 板卡系统升级与业务升级不要打进同一次默认 Job。系统层失败窗口包含整板重启，和 Docker 切换不是同一套事务。
+5. 安全门禁仍在「会停业务或会动执行器」的激活前执行。只下载、只升 Agent 进程时，不要求整机进入业务安全态；MCU/系统层激活前必须过门禁。
+
+```text
+日常：   只含 business        → 切容器，板子不重启
+偶发：   business + agent     → 先重启 Agent 进程，再切容器
+更少：   mcu                  → 刷指定 MCU 并复位该 MCU
+极少：   os / kernel / boot   → 单独 Job，重启该板卡
+```
 
 ---
 
@@ -686,7 +714,7 @@ MCU/内核/OS：仅 Executor 占位。
 
 ## 21. 一句话总结
 
-> **以 NX 为控制面、可选 x86 worker；Release 与 Job 分离并厂商签名；板端用 active/rollback/staged 管理业务生命周期；有网 digest 直拉、激活前安全门禁与强健康检查；双板四阶段事务 + trial lease；SQLite 断电恢复；磁盘按 release 引用清理；Agent 自升级延后并用 bootstrap 兜底。当前为架构基线，补齐异常世界后方可作为正式实现基线。**
+> **以 NX 为控制面、可选 x86 worker；按层升级（业务切容器、Agent 只重启进程、MCU 复位该芯片、系统层才重启板卡），不是每次全升；Release 与 Job 分离并厂商签名；板端用 active/rollback/staged 管理业务生命周期；有网 digest 直拉、激活前安全门禁与强健康检查；双板四阶段事务 + trial lease；SQLite 断电恢复；磁盘按 release 引用清理；Agent 自升级延后并用 bootstrap 兜底。当前为架构基线，补齐异常世界后方可作为正式实现基线。**
 
 ---
 
