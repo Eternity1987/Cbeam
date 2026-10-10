@@ -605,7 +605,9 @@ RECEIVED
 
 1. 收 Job → 拉/取 Release → 验签 → **SQLite 落盘**  
 2. PREFLIGHT：机型、agent min、空间、（双板）NAT/DNS/时间/CA/registry 鉴权  
-3. DOWNLOADING：参与节点按 digest 直拉（x86 经 NX NAT）；进度上报。断网失败**保留本地未完成文件**，下次同一 Job / 同一 digest 续传，不整包重下。Docker 层缓存同样保留；校验通过前不切换业务。  
+3. DOWNLOADING：参与节点拉取本板制品和镜像（x86 经 NX NAT）；进度上报。断网后续传分两种，校验通过前都不切换正在运行的业务：
+   - **包**（Release 里的 compose/config 压缩包，以及离线镜像 tar）：未下完的文件留在下载目录，恢复后对同一 URL 续传，再用 sha256 校验。不整包重下。
+   - **在线镜像**：不落成半截 tar。Docker 按层缓存，已下完的层保留；恢复后对同一个 `repository@digest` 只补缺的层。digest 对上才算该镜像就绪。  
 4. VERIFYING → 展开到 `staged`  
 5. WAITING_FOR_SAFE_STATE → PrepareForOTA  
 6. PREPARING_NODES → ACTIVATE（`--pull never`，按 stop/start order）  
@@ -695,7 +697,7 @@ MCU/内核/OS：仅 Executor 占位。
 
 ## 20. 生产验收标准（方案定稿门槛）
 
-1. 下载阶段任意断网，当前业务不受影响；已下载内容保留，恢复网络后按 digest 续传。  
+1. 下载阶段任意断网，当前业务不受影响。包文件和离线 tar 保留未完成部分并续传；在线镜像保留已完成的层，恢复后按同一 digest 补下剩余层。  
 2. NX 在任意状态点断电，启动后只能回到旧稳定版本或完成已提交的新版本。  
 3. x86 在 trial 阶段与 NX 失联，超时自动回退。  
 4. NX/x86 任一节点失败，最终两板回到一致 release。  
